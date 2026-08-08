@@ -1,8 +1,9 @@
-import json
+import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, TypedDict
+from typing import Annotated, TypedDict, cast
 
+from background import make_event_stream_name, outbox_publisher_supervisor
 from chat.schemas import (
     ConversationRead,
     MessageCreate,
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sse_starlette import EventSourceResponse, ServerSentEvent
 
 
 class AppState(TypedDict):
@@ -48,6 +50,11 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
     redis = Redis.from_url(
         REDIS_URL,
         decode_responses=True,
+        socket_timeout=None,
+    )
+
+    outbox_task_supervisor = asyncio.create_task(
+        outbox_publisher_supervisor(redis, session_factory)
     )
 
     yield {
@@ -56,8 +63,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
         "redis": redis,
     }
 
+    outbox_task_supervisor.cancel()
+
     await engine.dispose()
     await redis.close()
+
+
+async def get_redis(request: Request) -> Redis:
+    return request.state.redis
 
 
 async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
@@ -134,6 +147,7 @@ async def post_conversation_message(
             aggregate_id=message.id,
             event_type="message.created",
             payload={
+                "message_id": str(message.id),
                 "role": message.role,
                 "content": message.content,
                 "created_at": message.created_at.isoformat(),
@@ -143,3 +157,41 @@ async def post_conversation_message(
         session.add(event)
 
         return MessageRead.model_validate(message)
+
+
+@app.get("/api/conversations/{conversation_id}/events")
+async def get_conversation_events(
+    conversation_id: str,
+    request: Request,
+    redis: Annotated[Redis, Depends(get_redis)],
+):
+    stream_name: str = make_event_stream_name(conversation_id)
+
+    last_event_id: str = request.headers.get("last-event-id", "$")
+
+    async def generate() -> AsyncGenerator[ServerSentEvent, None]:
+        cursor = last_event_id
+
+        while not await request.is_disconnected():
+            result = await redis.xread(
+                {stream_name: cursor},
+                count=100,
+                block=5_000,
+            )
+
+            if not result:
+                continue
+
+            for _, messages in result:
+                for message_id, data in cast(
+                    list[tuple[str, dict[str, str]]], messages
+                ):
+                    cursor = message_id
+
+                    yield ServerSentEvent(
+                        id=message_id,
+                        event=data["event_type"],
+                        data=data["payload"],
+                    )
+
+    return EventSourceResponse(generate())

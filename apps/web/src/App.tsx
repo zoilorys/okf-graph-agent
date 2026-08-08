@@ -16,12 +16,22 @@ type Message = {
 type PendingMessage = {
   clientId: string;
   content: string;
-  serverMessageId?: string;
   status: 'pending' | 'failed';
 };
 
 type MessagesResponse = {
   data: Message[];
+};
+
+type ConversationEvent = {
+  id: string;
+  event_type: 'message.delta' | 'message.created';
+  payload: {
+    message_id: string;
+    role: Message['role'];
+    content: ContentBlock[];
+    created_at: string;
+  };
 };
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -42,21 +52,13 @@ export const App = () => {
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const pollMessages = async (id: string) => {
+  const loadMessageHistory = async (id: string) => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/conversations/${id}/messages`);
       if (!response.ok) throw new Error('Could not load messages.');
 
       const payload = (await response.json()) as MessagesResponse;
       setMessages(payload.data);
-      setPendingMessages((current) =>
-        current.filter(
-          (pending) =>
-            pending.status === 'failed' ||
-            !pending.serverMessageId ||
-            !payload.data.some((message) => message.id === pending.serverMessageId),
-        ),
-      );
       setError(null);
     } catch (requestError) {
       setError(
@@ -70,9 +72,95 @@ export const App = () => {
   useEffect(() => {
     if (!conversationId) return;
 
-    void pollMessages(conversationId);
-    const interval = window.setInterval(() => void pollMessages(conversationId), 1_000);
-    return () => window.clearInterval(interval);
+    let isCurrentConversation = true;
+    let eventSource: EventSource | undefined;
+
+    const upsertMessage = (message: Message) => {
+      setMessages((current) => {
+        const existingIndex = current.findIndex(({ id }) => id === message.id);
+        if (existingIndex === -1) return [...current, message];
+
+        const next = [...current];
+        next[existingIndex] = message;
+        return next;
+      });
+    };
+
+    const applyEvent = (event: ConversationEvent) => {
+      const message: Message = {
+        id: event.payload.message_id,
+        role: event.payload.role,
+        content: event.payload.content,
+        created_at: event.payload.created_at,
+      };
+
+      if (event.event_type === 'message.created') {
+        // A created event is the authoritative version of a message.
+        upsertMessage(message);
+      } else {
+        // Deltas append streamed content to the message, creating it if this is
+        // the first chunk received for that message.
+        setMessages((current) => {
+          const existingIndex = current.findIndex(({ id }) => id === message.id);
+          if (existingIndex === -1) return [...current, message];
+
+          const next = [...current];
+          next[existingIndex] = {
+            ...next[existingIndex],
+            content: [...next[existingIndex].content, ...message.content],
+          };
+          return next;
+        });
+      }
+    };
+
+    const readEvent = (nativeEvent: MessageEvent<string>, eventType?: ConversationEvent['event_type']) => {
+      try {
+        const data: unknown = JSON.parse(nativeEvent.data);
+        const event = (
+          data && typeof data === 'object' && 'event_type' in data && 'payload' in data
+            ? data
+            : { id: nativeEvent.lastEventId, event_type: eventType, payload: data }
+        ) as ConversationEvent;
+
+        if (
+          (event.event_type !== 'message.created' && event.event_type !== 'message.delta') ||
+          !event.payload
+        ) {
+          return;
+        }
+
+        applyEvent(event);
+        setError(null);
+      } catch {
+        setError('Could not process a conversation update.');
+      }
+    };
+
+    const connectToEvents = () => {
+      eventSource = new EventSource(`${API_BASE_URL}/api/conversations/${conversationId}/events`);
+      eventSource.addEventListener('message.created', (event) =>
+        readEvent(event as MessageEvent<string>, 'message.created'),
+      );
+      eventSource.addEventListener('message.delta', (event) =>
+        readEvent(event as MessageEvent<string>, 'message.delta'),
+      );
+      eventSource.onmessage = (event) => readEvent(event);
+      eventSource.onerror = () => {
+        setError('Connection to conversation updates was interrupted. Retrying…');
+      };
+    };
+
+    const initializeConversation = async () => {
+      await loadMessageHistory(conversationId);
+      if (isCurrentConversation) connectToEvents();
+    };
+
+    void initializeConversation();
+    return () => {
+      isCurrentConversation = false;
+      eventSource?.close();
+    };
   }, [conversationId]);
 
   useEffect(() => {
@@ -128,13 +216,16 @@ export const App = () => {
 
       const message = (await response.json()) as Message;
       setPendingMessages((current) =>
-        current.map((pending) =>
-          pending.clientId === clientId
-            ? { ...pending, serverMessageId: message.id }
-            : pending,
-        ),
+        current.filter((pending) => pending.clientId !== clientId),
       );
-      void pollMessages(conversationId);
+      setMessages((current) => {
+        const existingIndex = current.findIndex(({ id }) => id === message.id);
+        if (existingIndex === -1) return [...current, message];
+
+        const next = [...current];
+        next[existingIndex] = message;
+        return next;
+      });
     } catch (requestError) {
       setPendingMessages((current) =>
         current.map((pending) =>

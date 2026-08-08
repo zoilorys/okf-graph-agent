@@ -1,0 +1,13 @@
+.env*
+
+.vscode
+.zed
+.cursor
+
+node_modules
+
+.venv
+*.egg-info
+**/__pycache__
+
+.notes

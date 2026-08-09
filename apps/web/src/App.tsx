@@ -1,17 +1,23 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowUp, LoaderCircle, Sparkles } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 
 type ContentBlock = {
   type: 'text';
   text: string;
 };
 
+type MessageStatus = 'pending' | 'streaming' | 'completed';
+
 type Message = {
   id: string;
   role: 'user' | 'assistant';
   content: ContentBlock[];
   created_at: string;
+  status: MessageStatus;
 };
+
+type ApiMessage = Omit<Message, 'status'>;
 
 type PendingMessage = {
   clientId: string;
@@ -20,7 +26,7 @@ type PendingMessage = {
 };
 
 type MessagesResponse = {
-  data: Message[];
+  data: ApiMessage[];
 };
 
 type ConversationEvent = {
@@ -36,11 +42,23 @@ type ConversationEvent = {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
-const getMessageText = (message: Message) =>
+const getMessageText = (message: Pick<Message, 'content'>) =>
   message.content
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('\n');
+
+const appendContent = (current: ContentBlock[], delta: ContentBlock[]) => {
+  if (current.length === 0) return delta;
+
+  const next = [...current];
+  const lastBlock = next[next.length - 1];
+  next[next.length - 1] = {
+    ...lastBlock,
+    text: lastBlock.text + delta.map((block) => block.text).join(''),
+  };
+  return next;
+};
 
 export const App = () => {
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -58,7 +76,7 @@ export const App = () => {
       if (!response.ok) throw new Error('Could not load messages.');
 
       const payload = (await response.json()) as MessagesResponse;
-      setMessages(payload.data);
+      setMessages(payload.data.map((message) => ({ ...message, status: 'completed' })));
       setError(null);
     } catch (requestError) {
       setError(
@@ -92,6 +110,7 @@ export const App = () => {
         role: event.payload.role,
         content: event.payload.content,
         created_at: event.payload.created_at,
+        status: event.event_type === 'message.delta' ? 'streaming' : 'completed',
       };
 
       if (event.event_type === 'message.created') {
@@ -99,15 +118,18 @@ export const App = () => {
         upsertMessage(message);
       } else {
         // Deltas append streamed content to the message, creating it if this is
-        // the first chunk received for that message.
+        // the first chunk received for that message. A completed message is
+        // immutable: a late delta can arrive out of order after its final event.
         setMessages((current) => {
           const existingIndex = current.findIndex(({ id }) => id === message.id);
           if (existingIndex === -1) return [...current, message];
+          if (current[existingIndex].status === 'completed') return current;
 
           const next = [...current];
           next[existingIndex] = {
             ...next[existingIndex],
-            content: [...next[existingIndex].content, ...message.content],
+            content: appendContent(next[existingIndex].content, message.content),
+            status: 'streaming',
           };
           return next;
         });
@@ -214,16 +236,17 @@ export const App = () => {
       );
       if (!response.ok) throw new Error('Could not send your message.');
 
-      const message = (await response.json()) as Message;
+      const message = (await response.json()) as ApiMessage;
       setPendingMessages((current) =>
         current.filter((pending) => pending.clientId !== clientId),
       );
       setMessages((current) => {
         const existingIndex = current.findIndex(({ id }) => id === message.id);
-        if (existingIndex === -1) return [...current, message];
+        const completedMessage: Message = { ...message, status: 'completed' };
+        if (existingIndex === -1) return [...current, completedMessage];
 
         const next = [...current];
-        next[existingIndex] = message;
+        next[existingIndex] = completedMessage;
         return next;
       });
     } catch (requestError) {
@@ -289,10 +312,18 @@ export const App = () => {
                     className={
                       message.role === 'user'
                         ? 'max-w-[85%] rounded-2xl rounded-br-md bg-zinc-900 px-4 py-3 text-sm leading-6 text-white sm:max-w-[75%]'
-                        : 'max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md bg-zinc-100 px-4 py-3 text-sm leading-6 text-zinc-800 sm:max-w-[75%]'
+                        : 'max-w-[85%] rounded-2xl rounded-bl-md bg-zinc-100 px-4 py-3 text-sm leading-6 text-zinc-800 sm:max-w-[75%]'
                     }
                   >
-                    {getMessageText(message)}
+                    <div
+                      className={
+                        message.status === 'streaming'
+                          ? 'message-markdown message-markdown--streaming'
+                          : 'message-markdown'
+                      }
+                    >
+                      <ReactMarkdown>{getMessageText(message)}</ReactMarkdown>
+                    </div>
                   </div>
                 </article>
               ))}

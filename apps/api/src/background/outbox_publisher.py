@@ -1,7 +1,7 @@
 import asyncio
-import json
 import logging
 
+from chat.utils import event_model_to_redis_event
 from common import get_next_attempt_at
 from db import OutboxEvent
 from event import OutboxEventStatusEnum
@@ -55,11 +55,7 @@ async def publish(
 
     await redis.xadd(
         stream_name,
-        {
-            "id": str(event.id),
-            "event_type": event.event_type,
-            "payload": json.dumps(event.payload),
-        },
+        event_model_to_redis_event(event),
     )
 
 

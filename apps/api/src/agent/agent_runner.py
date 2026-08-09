@@ -1,20 +1,22 @@
 import asyncio
-import json
 import logging
-from typing import cast
+import uuid
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from background import make_event_stream_name
+from chat.utils import langchain_message_to_model, message_model_to_redis_event
 from common import get_next_attempt_at
 from db import Message
 from db.models import AgentRun
 from event import OutboxEventTypeEnum
+from langchain.agents.middleware.types import InputAgentState
 from langchain.messages import AIMessage, AnyMessage, HumanMessage
 from redis.asyncio import Redis
-from redis.typing import EncodableT, FieldT
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from agent.schemas import AgentRunStatusEnum
+from agent.schemas import AgentRunStatusEnum, MessagesChunkMessage, UpdatesChunkMessage
 
 from .agent import make_agent
 
@@ -68,32 +70,67 @@ async def run_agent(
 
     stored_messages = list((await session.execute(msg_stmt)).scalars().all())
 
-    agent_messages: list[AnyMessage] = [
+    agent_messages: list[AnyMessage | dict[str, Any]] = [
         HumanMessage(content=[dict(block) for block in msg.content])
         if msg.role == "user"
         else AIMessage(content=[dict(block) for block in msg.content])
         for msg in stored_messages
     ]
 
+    message_id_map = dict[str, uuid.UUID]()
+
     async for mode, chunk in agent.astream(
-        {"messages": agent_messages}, stream_mode=["messages", "updates"]
+        InputAgentState(messages=agent_messages), stream_mode=["messages", "updates"]
     ):
         match mode:
             case "messages":
                 print(("messages", chunk))
+                chunk = cast(MessagesChunkMessage, chunk)
+                chunk_message, _metadata = chunk
+
+                message = langchain_message_to_model(chunk_message, run.conversation_id)
+
+                message_id = message_id_map.get(str(chunk_message.id), None)
+
+                if message_id is None:
+                    msg_uuid = uuid.uuid7()
+                    message_id_map[str(chunk_message.id)] = msg_uuid
+                    message_id = msg_uuid
+
+                message.id = message_id
+                message.created_at = datetime.now(UTC)
+
+                await redis.xadd(
+                    make_event_stream_name(
+                        run.conversation_id,
+                    ),
+                    message_model_to_redis_event(
+                        OutboxEventTypeEnum.MESSAGE_DELTA, message
+                    ),
+                )
+
             case "updates":
                 print(("updates", chunk))
+                chunk = cast(UpdatesChunkMessage, chunk)
                 chunk_messages = chunk["model"]["messages"]
-                chunk_messages = cast(list[AIMessage], chunk_messages)
 
-                messages = [
-                    Message(
-                        conversation_id=run.conversation_id,
-                        role="assistant",
-                        content=[{"type": "text", "text": str(chunk_message.content)}],
+                messages: list[Message] = []
+
+                for chunk_message in chunk_messages:
+                    message = langchain_message_to_model(
+                        chunk_message, run.conversation_id
                     )
-                    for chunk_message in chunk_messages
-                ]
+
+                    message_id = message_id_map.get(str(chunk_message.id), None)
+
+                    if message_id is None:
+                        msg_uuid = uuid.uuid7()
+                        message_id_map[str(chunk_message.id)] = msg_uuid
+                        message_id = msg_uuid
+
+                    message.id = message_id
+
+                    messages.append(message)
 
                 session = session_factory()
                 async with session.begin():
@@ -104,20 +141,8 @@ async def run_agent(
                         make_event_stream_name(
                             run.conversation_id,
                         ),
-                        cast(
-                            dict[FieldT, EncodableT],
-                            {
-                                "id": str(message.id),
-                                "event_type": OutboxEventTypeEnum.MESSAGE_CREATED,
-                                "payload": json.dumps(
-                                    {
-                                        "message_id": str(message.id),
-                                        "role": "assistant",
-                                        "content": message.content,
-                                        "created_at": message.created_at.isoformat(),
-                                    }
-                                ),
-                            },
+                        message_model_to_redis_event(
+                            OutboxEventTypeEnum.MESSAGE_CREATED, message
                         ),
                     )
 

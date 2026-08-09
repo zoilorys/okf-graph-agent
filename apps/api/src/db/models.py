@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
-from chat.schemas import ContentBlock
+from chat.schemas import MessageContentBlock
 from common import JsonObject
+from event.schemas import RedisEventPayload
 from sqlalchemy import (
     UUID,
     BigInteger,
@@ -64,12 +66,12 @@ class Message(Base):
         nullable=False,
     )
 
-    role: Mapped[str] = mapped_column(
+    role: Mapped[Literal["user", "assistant", "tool", "system"]] = mapped_column(
         Text,
         nullable=False,
     )
 
-    content: Mapped[list[dict[str, str | int | bool | None]]] = mapped_column(
+    content: Mapped[list[MessageContentBlock]] = mapped_column(
         JSONB,
         nullable=False,
     )
@@ -133,7 +135,7 @@ class OutboxEvent(Base):
         nullable=False,
     )
 
-    payload: Mapped[JsonObject] = mapped_column(
+    payload: Mapped[RedisEventPayload] = mapped_column(
         JSONB,
         nullable=False,
     )

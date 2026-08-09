@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, TypedDict
 
 from common import JsonObject
 from pydantic import BaseModel, ConfigDict
@@ -27,16 +27,16 @@ class ConversationRead(ORMModel):
     created_at: datetime
 
 
-class ContentBlockText(ORMModel):
-    type: Literal["text"] = "text"
+class MessageContentBlockText(TypedDict):
+    type: Literal["text"]
     text: str
 
 
-ContentBlock = ContentBlockText
+MessageContentBlock = MessageContentBlockText
 
 
 class MessageCreate(ORMModel):
-    content: list[ContentBlock]
+    content: list[MessageContentBlock]
 
 
 class MessageRead(MessageCreate):

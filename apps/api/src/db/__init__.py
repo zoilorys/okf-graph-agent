@@ -1,6 +1,6 @@
 import os
 
-from .models import Base, Conversation, Message, OutboxEvent
+from .models import AgentRun, Base, Conversation, Message, OutboxEvent
 
 DATABASE_URL_ENV = os.getenv("DATABASE_URL")
 DATABASE_URL = (
@@ -14,6 +14,7 @@ REDIS_URL = REDIS_URL_ENV if REDIS_URL_ENV != None else "redis://localhost:6379"
 __all__ = [
     "DATABASE_URL",
     "REDIS_URL",
+    "AgentRun",
     "Base",
     "Conversation",
     "Message",

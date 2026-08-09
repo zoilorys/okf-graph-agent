@@ -1,22 +1,9 @@
 import uuid
 from datetime import datetime
-from enum import StrEnum
 from typing import ClassVar, Literal
 
-from db.models import JsonObject
+from common import JsonObject
 from pydantic import BaseModel, ConfigDict
-
-
-class OutboxEventStatusType(StrEnum):
-    PENDING = "pending"
-    PUBLISHING = "publishing"
-    PUBLISHED = "published"
-    FAILED = "failed"
-
-
-class OutboxEventType(StrEnum):
-    MESSAGE_CREATED = "message.created"
-    MESSAGE_DELTA = "message.delta"
 
 
 class ORMModel(BaseModel):
@@ -41,7 +28,7 @@ class ConversationRead(ORMModel):
 
 
 class ContentBlockText(ORMModel):
-    type: Literal["text"]
+    type: Literal["text"] = "text"
     text: str
 
 

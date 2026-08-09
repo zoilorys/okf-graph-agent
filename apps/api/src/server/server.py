@@ -3,6 +3,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, TypedDict, cast
 
+from agent.agent_runner import agent_runner_supervisor
 from background import make_event_stream_name, outbox_publisher_supervisor
 from chat.schemas import (
     ConversationRead,
@@ -11,8 +12,10 @@ from chat.schemas import (
     ResponseData,
     ResponsePagination,
 )
-from db import DATABASE_URL, REDIS_URL
+from db import DATABASE_URL, REDIS_URL, AgentRun
 from db.models import Conversation, Message, OutboxEvent
+from event import OutboxEventTypeEnum
+from event.schemas import OutboxEventAggregateEnum
 from fastapi import Depends, FastAPI, Request, status
 from redis.asyncio import Redis
 from sqlalchemy import select
@@ -56,6 +59,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
     outbox_task_supervisor = asyncio.create_task(
         outbox_publisher_supervisor(redis, session_factory)
     )
+    agent_runner_task_supervisor = asyncio.create_task(
+        agent_runner_supervisor(redis, session_factory)
+    )
 
     yield {
         "engine": engine,
@@ -64,6 +70,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
     }
 
     outbox_task_supervisor.cancel()
+    agent_runner_task_supervisor.cancel()
 
     await engine.dispose()
     await redis.close()
@@ -143,9 +150,9 @@ async def post_conversation_message(
 
         event = OutboxEvent(
             conversation_id=message.conversation_id,
-            aggregate_type="message",
+            aggregate_type=OutboxEventAggregateEnum.MESSAGE,
             aggregate_id=message.id,
-            event_type="message.created",
+            event_type=OutboxEventTypeEnum.MESSAGE_CREATED,
             payload={
                 "message_id": str(message.id),
                 "role": message.role,
@@ -155,6 +162,14 @@ async def post_conversation_message(
         )
 
         session.add(event)
+
+        agent_run = AgentRun(
+            conversation_id=message.conversation_id,
+            trigger_type="message",
+            trigger_id=message.id,
+        )
+
+        session.add(agent_run)
 
         return MessageRead.model_validate(message)
 

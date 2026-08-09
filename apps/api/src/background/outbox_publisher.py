@@ -1,11 +1,10 @@
 import asyncio
 import json
 import logging
-import random
-from datetime import UTC, datetime, timedelta
 
-from chat.schemas import OutboxEventStatusType
+from common import get_next_attempt_at
 from db import OutboxEvent
+from event import OutboxEventStatusEnum
 from redis.asyncio import Redis
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -16,18 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 MAX_RETRIES: int = 3
-
-
-def get_next_attempt_at(
-    attempt: int,
-    *,
-    base_delay: float = 1.0,
-    max_delay: float = 60.0,
-) -> datetime:
-    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-    delay *= random.uniform(0.8, 1.2)
-
-    return datetime.now(UTC) + timedelta(seconds=delay)
 
 
 async def claim_pending_events(
@@ -41,7 +28,7 @@ async def claim_pending_events(
             select(OutboxEvent)
             .where(
                 and_(
-                    OutboxEvent.status == OutboxEventStatusType.PENDING,
+                    OutboxEvent.status == OutboxEventStatusEnum.PENDING,
                     OutboxEvent.next_attempt_at <= func.now(),
                 )
             )
@@ -55,18 +42,15 @@ async def claim_pending_events(
         events = list(select_result.scalars().all())
 
         for event in events:
-            event.status = OutboxEventStatusType.PUBLISHING
+            event.status = OutboxEventStatusEnum.PUBLISHING
 
     return events
 
 
 async def publish(
     redis: Redis,
-    session_factory: async_sessionmaker[AsyncSession],
     event: OutboxEvent,
 ):
-    session = session_factory()
-
     stream_name = make_event_stream_name(event.conversation_id)
 
     await redis.xadd(
@@ -78,8 +62,15 @@ async def publish(
         },
     )
 
+
+async def mark_published(
+    session_factory: async_sessionmaker[AsyncSession],
+    event: OutboxEvent,
+):
+    session = session_factory()
+
     async with session.begin():
-        event.status = OutboxEventStatusType.PUBLISHED
+        event.status = OutboxEventStatusEnum.PUBLISHED
         event.published_at = func.now()
 
 
@@ -93,9 +84,9 @@ async def mark_retry_or_failed(
         attempt = event.attempt + 1
 
         if attempt > MAX_RETRIES:
-            event.status = OutboxEventStatusType.FAILED
+            event.status = OutboxEventStatusEnum.FAILED
         else:
-            event.status = OutboxEventStatusType.PENDING
+            event.status = OutboxEventStatusEnum.PENDING
             event.attempt = attempt
             event.next_attempt_at = get_next_attempt_at(attempt)
 
@@ -106,7 +97,7 @@ async def publish_one(
     event: OutboxEvent,
 ):
     try:
-        await publish(redis, session_factory, event)
+        await publish(redis, event)
 
     except asyncio.CancelledError:
         raise
@@ -118,6 +109,9 @@ async def publish_one(
         )
 
         await mark_retry_or_failed(session_factory, event)
+        return
+
+    await mark_published(session_factory, event)
 
 
 async def outbox_publisher(

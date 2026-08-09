@@ -1,3 +1,10 @@
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+load_dotenv(REPO_ROOT / ".env")
+
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager

@@ -15,6 +15,7 @@ class OutboxEventStatusEnum(StrEnum):
 class OutboxEventTypeEnum(StrEnum):
     MESSAGE_CREATED = "message.created"
     MESSAGE_DELTA = "message.delta"
+    PRESENCE = "presence"
 
 
 class OutboxEventAggregateEnum(StrEnum):

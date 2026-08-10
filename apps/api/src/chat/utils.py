@@ -81,3 +81,11 @@ def event_model_to_redis_event(event: OutboxEvent) -> RedisEvent:
         "event_type": event.event_type,
         "payload": json.dumps(event.payload),
     }
+
+
+def make_presence_event(typing: bool = False) -> RedisEvent:
+    return {
+        "id": str(uuid.uuid7()),
+        "event_type": OutboxEventTypeEnum.PRESENCE,
+        "payload": json.dumps({"typing": typing}),
+    }

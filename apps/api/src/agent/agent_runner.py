@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from background import make_event_stream_name
-from chat.utils import langchain_message_to_model, message_model_to_redis_event
+from chat.utils import (
+    langchain_message_to_model,
+    make_presence_event,
+    message_model_to_redis_event,
+)
 from common import get_next_attempt_at
 from db import Message
 from db.models import AgentRun
@@ -79,6 +83,13 @@ async def run_agent(
 
     message_id_map = dict[str, uuid.UUID]()
 
+    await redis.xadd(
+        make_event_stream_name(
+            run.conversation_id,
+        ),
+        make_presence_event(typing=True),
+    )
+
     async for mode, chunk in agent.astream(
         InputAgentState(messages=agent_messages), stream_mode=["messages", "updates"]
     ):
@@ -148,6 +159,13 @@ async def run_agent(
 
             case _:
                 pass
+
+    await redis.xadd(
+        make_event_stream_name(
+            run.conversation_id,
+        ),
+        make_presence_event(typing=False),
+    )
 
 
 async def mark_completed(

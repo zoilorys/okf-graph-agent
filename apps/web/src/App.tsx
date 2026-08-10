@@ -29,7 +29,7 @@ type MessagesResponse = {
   data: ApiMessage[];
 };
 
-type ConversationEvent = {
+type MessageEvent = {
   id: string;
   event_type: 'message.delta' | 'message.created';
   payload: {
@@ -39,6 +39,16 @@ type ConversationEvent = {
     created_at: string;
   };
 };
+
+type PresenceEvent = {
+  id: string;
+  event_type: 'presence';
+  payload: {
+    typing: boolean;
+  };
+};
+
+type ConversationEvent = MessageEvent | PresenceEvent;
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 
@@ -61,12 +71,16 @@ const appendContent = (current: ContentBlock[], delta: ContentBlock[]) => {
 };
 
 export const App = () => {
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(() => {
+    const id = new URLSearchParams(window.location.search).get('conversation_id');
+    return id || null;
+  });
   const [isStarting, setIsStarting] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const [isAgentTyping, setIsAgentTyping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -92,6 +106,7 @@ export const App = () => {
 
     let isCurrentConversation = true;
     let eventSource: EventSource | undefined;
+    setIsAgentTyping(false);
 
     const upsertMessage = (message: Message) => {
       setMessages((current) => {
@@ -104,7 +119,7 @@ export const App = () => {
       });
     };
 
-    const applyEvent = (event: ConversationEvent) => {
+    const applyEvent = (event: MessageEvent) => {
       const message: Message = {
         id: event.payload.message_id,
         role: event.payload.role,
@@ -136,7 +151,7 @@ export const App = () => {
       }
     };
 
-    const readEvent = (nativeEvent: MessageEvent<string>, eventType?: ConversationEvent['event_type']) => {
+    const readEvent = (nativeEvent: globalThis.MessageEvent<string>, eventType?: ConversationEvent['event_type']) => {
       try {
         const data: unknown = JSON.parse(nativeEvent.data);
         const event = (
@@ -145,14 +160,14 @@ export const App = () => {
             : { id: nativeEvent.lastEventId, event_type: eventType, payload: data }
         ) as ConversationEvent;
 
-        if (
-          (event.event_type !== 'message.created' && event.event_type !== 'message.delta') ||
-          !event.payload
-        ) {
-          return;
+        if (event.event_type === 'presence') {
+          if (typeof event.payload?.typing !== 'boolean') return;
+          setIsAgentTyping(event.payload.typing);
+        } else {
+          if (!event.payload) return;
+          applyEvent(event);
         }
 
-        applyEvent(event);
         setError(null);
       } catch {
         setError('Could not process a conversation update.');
@@ -162,10 +177,13 @@ export const App = () => {
     const connectToEvents = () => {
       eventSource = new EventSource(`${API_BASE_URL}/api/conversations/${conversationId}/events`);
       eventSource.addEventListener('message.created', (event) =>
-        readEvent(event as MessageEvent<string>, 'message.created'),
+        readEvent(event as globalThis.MessageEvent<string>, 'message.created'),
       );
       eventSource.addEventListener('message.delta', (event) =>
-        readEvent(event as MessageEvent<string>, 'message.delta'),
+        readEvent(event as globalThis.MessageEvent<string>, 'message.delta'),
+      );
+      eventSource.addEventListener('presence', (event) =>
+        readEvent(event as globalThis.MessageEvent<string>, 'presence'),
       );
       eventSource.onmessage = (event) => readEvent(event);
       eventSource.onerror = () => {
@@ -214,7 +232,7 @@ export const App = () => {
   const sendMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const text = draft.trim();
-    if (!text || !conversationId || isSending) return;
+    if (!text || !conversationId || isSending || isAgentTyping) return;
 
     const clientId = crypto.randomUUID();
     setDraft('');
@@ -266,8 +284,8 @@ export const App = () => {
   };
 
   return (
-    <main className="min-h-screen bg-[#f8f8f7] px-5 py-8 text-zinc-900 sm:px-8 sm:py-10">
-      <section className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-3xl flex-col rounded-[2rem] border border-zinc-200/80 bg-white shadow-[0_20px_70px_-35px_rgba(24,24,27,0.3)] sm:min-h-[calc(100vh-5rem)]">
+    <main className="h-screen overflow-hidden bg-[#f8f8f7] px-5 py-8 text-zinc-900 sm:px-8 sm:py-10">
+      <section className="mx-auto flex h-[calc(100vh-4rem)] w-full max-w-3xl flex-col rounded-[2rem] border border-zinc-200/80 bg-white shadow-[0_20px_70px_-35px_rgba(24,24,27,0.3)] sm:h-[calc(100vh-5rem)]">
         <header className="flex items-center gap-3 border-b border-zinc-100 px-6 py-5 sm:px-8">
           <div className="grid size-9 place-items-center rounded-xl bg-zinc-900 text-white">
             <Sparkles className="size-4" aria-hidden="true" />
@@ -299,7 +317,7 @@ export const App = () => {
           </div>
         ) : (
           <>
-            <div className="flex-1 space-y-5 overflow-y-auto px-5 py-7 sm:px-8">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-7 sm:px-8">
               {messages.length === 0 && pendingMessages.length === 0 && (
                 <p className="pt-6 text-center text-sm text-zinc-400">Send a message to begin.</p>
               )}
@@ -341,6 +359,14 @@ export const App = () => {
                   </div>
                 </article>
               ))}
+              {isAgentTyping && (
+                <div className="flex justify-start" role="status" aria-live="polite">
+                  <div className="flex items-center gap-2 rounded-2xl rounded-bl-md bg-zinc-100 px-4 py-3 text-sm text-zinc-500">
+                    <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+                    Thinking…
+                  </div>
+                </div>
+              )}
               <div ref={bottomRef} />
             </div>
 
@@ -361,7 +387,7 @@ export const App = () => {
                 />
                 <button
                   type="submit"
-                  disabled={!draft.trim() || isSending}
+                  disabled={!draft.trim() || isSending || isAgentTyping}
                   className="grid size-10 shrink-0 place-items-center rounded-xl bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400"
                   aria-label="Send message"
                 >

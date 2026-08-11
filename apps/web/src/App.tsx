@@ -253,6 +253,11 @@ export const App = () => {
           body: JSON.stringify({ content: [{ type: 'text', text }] }),
         },
       );
+      if (response.status === 409) {
+        throw new Error(
+          'Your message was not sent because the agent is still processing your previous message.',
+        );
+      }
       if (!response.ok) throw new Error('Could not send your message.');
 
       const message = (await response.json()) as ApiMessage;

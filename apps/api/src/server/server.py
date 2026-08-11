@@ -22,10 +22,10 @@ from chat.schemas import (
 )
 from db import DATABASE_URL, REDIS_URL, AgentRun
 from db.models import Conversation, Message
-from fastapi import Depends, FastAPI, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from outbox import make_event_stream_name, outbox_publisher_supervisor
 from redis.asyncio import Redis
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -146,6 +146,24 @@ async def post_conversation_message(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> MessageRead:
     async with session.begin():
+        stmt = select(AgentRun).where(
+            and_(
+                AgentRun.conversation_id == conversation_id,
+                or_(
+                    AgentRun.status == AgentRunStatusEnum.PENDING,
+                    AgentRun.status == AgentRunStatusEnum.RUNNING,
+                    AgentRun.status == AgentRunStatusEnum.INTERRUPT_REQUESTED,
+                ),
+            )
+        )
+        existing_run = (await session.execute(stmt)).scalar_one_or_none()
+
+        if existing_run is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot accept message while agent is running",
+            )
+
         message = Message(
             conversation_id=conversation_id,
             role="user",

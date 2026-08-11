@@ -25,7 +25,13 @@ docker compose up -d
 cp .env.example .env
 ```
 
-4. Start BE and FE apps:
+4. Run DB migrations with alembic:
+
+```bash
+uv run --package api alembic upgrade head
+```
+
+5. Start BE and FE apps:
 
 ```bash
 # BE app
@@ -35,7 +41,7 @@ uv run fastapi dev
 pnpm --filter web dev
 ```
 
-5. Open the web app interface in the browser, by default its [http://localhost:5173/](http://localhost:5173/)
+6. Open the web app interface in the browser, by default its [http://localhost:5173/](http://localhost:5173/)
 
 ### Tech stack
 

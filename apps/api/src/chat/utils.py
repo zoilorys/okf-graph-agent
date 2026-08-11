@@ -5,6 +5,7 @@ from db import Message
 from db.models import OutboxEvent
 from event import OutboxEventTypeEnum
 from event.schemas import (
+    OutboxEventAggregateEnum,
     RedisEvent,
     RedisEventPayload,
     RedisEventPayloadMessage,
@@ -89,3 +90,18 @@ def make_presence_event(typing: bool = False) -> RedisEvent:
         "event_type": OutboxEventTypeEnum.PRESENCE,
         "payload": json.dumps({"typing": typing}),
     }
+
+
+def message_model_to_outbox(message: Message) -> OutboxEvent:
+    return OutboxEvent(
+        conversation_id=message.conversation_id,
+        aggregate_type=OutboxEventAggregateEnum.MESSAGE,
+        aggregate_id=message.id,
+        event_type=OutboxEventTypeEnum.MESSAGE_CREATED,
+        payload={
+            "message_id": str(message.id),
+            "role": message.role,
+            "content": message.content,
+            "created_at": message.created_at.isoformat(),
+        },
+    )

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { ArrowUp, LoaderCircle, Sparkles } from 'lucide-react';
+import { ArrowUp, LoaderCircle, Sparkles, Square } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 
 type ContentBlock = {
@@ -81,6 +81,7 @@ export const App = () => {
   const [draft, setDraft] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isAgentTyping, setIsAgentTyping] = useState(false);
+  const [isInterrupting, setIsInterrupting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -283,6 +284,28 @@ export const App = () => {
     }
   };
 
+  const interruptConversation = async () => {
+    if (!conversationId || !isAgentTyping || isInterrupting) return;
+
+    setIsInterrupting(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/conversations/${conversationId}/interrupt`,
+        { method: 'POST' },
+      );
+      if (!response.ok) throw new Error('Could not interrupt the agent.');
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : 'Could not interrupt the agent.',
+      );
+    } finally {
+      setIsInterrupting(false);
+    }
+  };
+
   return (
     <main className="h-screen overflow-hidden bg-[#f8f8f7] px-5 py-8 text-zinc-900 sm:px-8 sm:py-10">
       <section className="mx-auto flex h-[calc(100vh-4rem)] w-full max-w-3xl flex-col rounded-[2rem] border border-zinc-200/80 bg-white shadow-[0_20px_70px_-35px_rgba(24,24,27,0.3)] sm:h-[calc(100vh-5rem)]">
@@ -386,12 +409,19 @@ export const App = () => {
                   }}
                 />
                 <button
-                  type="submit"
-                  disabled={!draft.trim() || isSending || isAgentTyping}
+                  type={isAgentTyping ? 'button' : 'submit'}
+                  onClick={isAgentTyping ? () => void interruptConversation() : undefined}
+                  disabled={
+                    isAgentTyping
+                      ? isInterrupting
+                      : !draft.trim() || isSending
+                  }
                   className="grid size-10 shrink-0 place-items-center rounded-xl bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-400"
-                  aria-label="Send message"
+                  aria-label={isAgentTyping ? 'Interrupt agent' : 'Send message'}
                 >
-                  {isSending ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
+                  {isAgentTyping ? (
+                    isInterrupting ? <LoaderCircle className="size-4 animate-spin" /> : <Square className="size-4" />
+                  ) : isSending ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
                 </button>
               </div>
               <p className="mt-2 text-center text-xs text-zinc-400">Press Enter to send · Shift + Enter for a new line</p>

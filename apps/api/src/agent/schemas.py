@@ -9,6 +9,8 @@ class AgentRunStatusEnum(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    INTERRUPT_REQUESTED = "interrupt_requested"
+    INTERRUPTED = "interrupted"
 
 
 class UpdatesChunkMessageModel(TypedDict):

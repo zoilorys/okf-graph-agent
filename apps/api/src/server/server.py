@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from agent.schemas import AgentRunStatusEnum
+from chat.utils import message_model_to_outbox
 from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -20,12 +22,10 @@ from chat.schemas import (
     ResponsePagination,
 )
 from db import DATABASE_URL, REDIS_URL, AgentRun
-from db.models import Conversation, Message, OutboxEvent
-from event import OutboxEventTypeEnum
-from event.schemas import OutboxEventAggregateEnum
+from db.models import Conversation, Message
 from fastapi import Depends, FastAPI, Request, status
 from redis.asyncio import Redis
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -155,18 +155,7 @@ async def post_conversation_message(
         session.add(message)
         await session.flush()
 
-        event = OutboxEvent(
-            conversation_id=message.conversation_id,
-            aggregate_type=OutboxEventAggregateEnum.MESSAGE,
-            aggregate_id=message.id,
-            event_type=OutboxEventTypeEnum.MESSAGE_CREATED,
-            payload={
-                "message_id": str(message.id),
-                "role": message.role,
-                "content": message.content,
-                "created_at": message.created_at.isoformat(),
-            },
-        )
+        event = message_model_to_outbox(message)
 
         session.add(event)
 
@@ -179,6 +168,28 @@ async def post_conversation_message(
         session.add(agent_run)
 
         return MessageRead.model_validate(message)
+
+
+@app.post(
+    "/api/conversations/{conversation_id}/interrupt",
+    status_code=status.HTTP_200_OK,
+)
+async def interrupt_conversation(
+    conversation_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    async with session.begin():
+        stmt = select(AgentRun).where(
+            and_(
+                AgentRun.conversation_id == conversation_id,
+                AgentRun.status == AgentRunStatusEnum.RUNNING,
+            )
+        )
+
+        runs = list((await session.execute(stmt)).scalars().all())
+
+        for run in runs:
+            run.status = AgentRunStatusEnum.INTERRUPT_REQUESTED
 
 
 @app.get("/api/conversations/{conversation_id}/events")

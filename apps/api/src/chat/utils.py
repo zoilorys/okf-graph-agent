@@ -105,3 +105,19 @@ def message_model_to_outbox(message: Message) -> OutboxEvent:
             "created_at": message.created_at.isoformat(),
         },
     )
+
+
+class UnhandledMessageTypeException(Exception):
+    """Error returned by `message_model_to_langchain_message` for unhandled message types"""
+
+
+def message_model_to_langchain_message(message: Message) -> AnyMessage:
+    match message.role:
+        case "user":
+            return HumanMessage(content=[dict(block) for block in message.content])
+        case "assistant":
+            return AIMessage(content=[dict(block) for block in message.content])
+        case _:
+            raise UnhandledMessageTypeException(
+                f"Unhandled message type! {message.role}"
+            )

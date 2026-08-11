@@ -13,7 +13,6 @@ from contextlib import asynccontextmanager
 from typing import Annotated, TypedDict, cast
 
 from agent.agent_runner import agent_runner_supervisor
-from background import make_event_stream_name, outbox_publisher_supervisor
 from chat.schemas import (
     ConversationRead,
     MessageCreate,
@@ -24,6 +23,7 @@ from chat.schemas import (
 from db import DATABASE_URL, REDIS_URL, AgentRun
 from db.models import Conversation, Message
 from fastapi import Depends, FastAPI, Request, status
+from outbox import make_event_stream_name, outbox_publisher_supervisor
 from redis.asyncio import Redis
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import (

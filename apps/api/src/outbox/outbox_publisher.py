@@ -1,15 +1,16 @@
 import asyncio
 import logging
+import uuid
 
 from chat.utils import event_model_to_redis_event
 from common import get_next_attempt_at
 from db import OutboxEvent
 from event import OutboxEventStatusEnum
 from redis.asyncio import Redis
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from background.utils import make_event_stream_name
+from outbox.utils import make_event_stream_name
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +21,8 @@ MAX_RETRIES: int = 3
 async def claim_pending_events(
     session_factory: async_sessionmaker[AsyncSession],
     limit: int = 5,
-) -> list[OutboxEvent]:
-    session = session_factory()
-
-    async with session.begin():
+):
+    async with session_factory.begin() as session:
         stmt = (
             select(OutboxEvent)
             .where(
@@ -37,46 +36,55 @@ async def claim_pending_events(
             .with_for_update(skip_locked=True)
         )
 
-        select_result = await session.execute(stmt)
-
-        events = list(select_result.scalars().all())
+        events = (await session.execute(stmt)).scalars().all()
 
         for event in events:
             event.status = OutboxEventStatusEnum.PUBLISHING
 
-    return events
+    return [(event.id, event.conversation_id) for event in events]
 
 
 async def publish(
     redis: Redis,
-    event: OutboxEvent,
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: uuid.UUID,
+    conversation_id: uuid.UUID,
 ):
-    stream_name = make_event_stream_name(event.conversation_id)
+    async with session_factory.begin() as session:
+        event = await session.get_one(OutboxEvent, event_id)
 
     await redis.xadd(
-        stream_name,
+        make_event_stream_name(conversation_id),
         event_model_to_redis_event(event),
     )
 
 
 async def mark_published(
     session_factory: async_sessionmaker[AsyncSession],
-    event: OutboxEvent,
+    event_id: uuid.UUID,
 ):
-    session = session_factory()
+    async with session_factory.begin() as session:
+        stmt = (
+            update(OutboxEvent)
+            .where(
+                and_(
+                    OutboxEvent.id == event_id,
+                    OutboxEvent.status == OutboxEventStatusEnum.PUBLISHING,
+                )
+            )
+            .values(status=OutboxEventStatusEnum.PUBLISHED, published_at=func.now())
+        )
 
-    async with session.begin():
-        event.status = OutboxEventStatusEnum.PUBLISHED
-        event.published_at = func.now()
+        await session.execute(stmt)
 
 
 async def mark_retry_or_failed(
     session_factory: async_sessionmaker[AsyncSession],
-    event: OutboxEvent,
+    event_id: uuid.UUID,
 ):
-    session = session_factory()
+    async with session_factory.begin() as session:
+        event = await session.get_one(OutboxEvent, event_id)
 
-    async with session.begin():
         attempt = event.attempt + 1
 
         if attempt > MAX_RETRIES:
@@ -90,10 +98,11 @@ async def mark_retry_or_failed(
 async def publish_one(
     redis: Redis,
     session_factory: async_sessionmaker[AsyncSession],
-    event: OutboxEvent,
+    event_id: uuid.UUID,
+    conversation_id: uuid.UUID,
 ):
     try:
-        await publish(redis, event)
+        await publish(redis, session_factory, event_id, conversation_id)
 
     except asyncio.CancelledError:
         raise
@@ -101,13 +110,13 @@ async def publish_one(
     except Exception:
         logger.exception(
             "Failed to publish outbox event %s",
-            event.id,
+            event_id,
         )
 
-        await mark_retry_or_failed(session_factory, event)
+        await mark_retry_or_failed(session_factory, event_id)
         return
 
-    await mark_published(session_factory, event)
+    await mark_published(session_factory, event_id)
 
 
 async def outbox_publisher(
@@ -115,15 +124,17 @@ async def outbox_publisher(
     session_factory: async_sessionmaker[AsyncSession],
 ):
     while True:
-        claimed_events = await claim_pending_events(session_factory)
+        claimed_event_ids = await claim_pending_events(session_factory)
 
-        if len(claimed_events) == 0:
+        if len(claimed_event_ids) == 0:
             await asyncio.sleep(0.2)
             continue
 
         async with asyncio.TaskGroup() as tg:
-            for event in claimed_events:
-                tg.create_task(publish_one(redis, session_factory, event))
+            for event_id, conversation_id in claimed_event_ids:
+                tg.create_task(
+                    publish_one(redis, session_factory, event_id, conversation_id)
+                )
 
 
 async def outbox_publisher_supervisor(

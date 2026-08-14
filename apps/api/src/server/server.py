@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from agent.schemas import AgentRunStatusEnum
@@ -12,7 +13,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, TypedDict, cast
 
-from agent.agent_runner import agent_runner_supervisor
+from agent.agent_runner import INTERRUPT_CHANNEL, agent_runner_supervisor
 from chat.schemas import (
     ConversationRead,
     MessageCreate,
@@ -25,7 +26,7 @@ from db.models import Conversation, Message
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from outbox import make_event_stream_name, outbox_publisher_supervisor
 from redis.asyncio import Redis
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -33,6 +34,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sse_starlette import EventSourceResponse, ServerSentEvent
+
+logger = logging.getLogger(__name__)
 
 
 class AppState(TypedDict):
@@ -79,8 +82,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
     outbox_task_supervisor.cancel()
     agent_runner_task_supervisor.cancel()
 
+    await asyncio.gather(
+        outbox_task_supervisor, agent_runner_task_supervisor, return_exceptions=True
+    )
+
+    await redis.aclose()
     await engine.dispose()
-    await redis.close()
 
 
 async def get_redis(request: Request) -> Redis:
@@ -195,19 +202,36 @@ async def post_conversation_message(
 async def interrupt_conversation(
     conversation_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
+    redis: Annotated[Redis, Depends(get_redis)],
 ):
     async with session.begin():
-        stmt = select(AgentRun).where(
-            and_(
-                AgentRun.conversation_id == conversation_id,
-                AgentRun.status == AgentRunStatusEnum.RUNNING,
+        stmt = (
+            update(AgentRun)
+            .where(
+                and_(
+                    AgentRun.conversation_id == conversation_id,
+                    AgentRun.status == AgentRunStatusEnum.RUNNING,
+                )
             )
+            .values(status=AgentRunStatusEnum.INTERRUPT_REQUESTED)
+            .returning(AgentRun.id)
         )
 
-        runs = list((await session.execute(stmt)).scalars().all())
+        run_ids = list((await session.execute(stmt)).scalars())
 
-        for run in runs:
-            run.status = AgentRunStatusEnum.INTERRUPT_REQUESTED
+    for run_id in run_ids:
+        try:
+            await redis.publish(
+                INTERRUPT_CHANNEL,
+                str(run_id),
+            )
+        except Exception:
+            logger.exception(
+                "Could not publish interrupt notification for run %s",
+                run_id,
+            )
+
+    return {"interrupted_runs": len(run_ids)}
 
 
 @app.get("/api/conversations/{conversation_id}/events")
